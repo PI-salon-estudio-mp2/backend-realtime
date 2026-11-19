@@ -44,6 +44,11 @@ export async function buscarSala(id: string): Promise<SalaGuardada | null> {
   };
 }
 
+/** ¿La cuenta sigue teniendo perfil? (false si se eliminó con el socket abierto). */
+export async function perfilExiste(uid: string): Promise<boolean> {
+  return (await db.collection("users").doc(uid).get()).exists;
+}
+
 /** Registra al usuario como miembro de la sala (para la política de US-05). */
 export async function agregarMiembro(salaId: string, uid: string): Promise<void> {
   await salas().doc(salaId).update({ miembros: FieldValue.arrayUnion(uid) });
