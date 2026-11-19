@@ -3,6 +3,7 @@ import {
   agregarMiembro,
   buscarSala,
   guardarMensaje,
+  perfilExiste,
   ultimosMensajes,
 } from "../repositories/rooms.repository";
 import type {
@@ -30,6 +31,7 @@ const ERRORES = {
   fueraDeSala: { code: "NOT_IN_ROOM", message: "Primero tienes que entrar a la sala." },
   mensajeVacio: { code: "VALIDATION_ERROR", message: "Escribe un mensaje antes de enviarlo." },
   mensajeLargo: { code: "VALIDATION_ERROR", message: `Usa máximo ${MAX_MENSAJE} caracteres por mensaje.` },
+  sinCuenta: { code: "UNAUTHORIZED", message: "Tu sesión no es válida o expiró. Inicia sesión de nuevo." },
   servidor: { code: "SERVER_UNAVAILABLE", message: "No se pudo conectar con la base de datos. Inténtalo de nuevo." },
 } satisfies Record<string, ErrorSocket>;
 
@@ -87,7 +89,7 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
       return responder({
         ok: true,
         data: {
-          sala: { ...sala, rol: sala.anfitrionUid === usuario.uid ? "anfitrion" : "invitado" },
+          sala: { ...sala, rol: sala.anfitrionUid === usuario.uid ? "administrador" : "invitado" },
           presentes,
           historial,
         },
@@ -122,8 +124,14 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
     if (texto.length > MAX_MENSAJE) return responder({ ok: false, error: ERRORES.mensajeLargo });
 
     try {
-      // Si el anfitrión borró la sala mientras tanto, no se guarda nada (sin mensajes huérfanos).
-      if (!(await buscarSala(id))) {
+      // Sin mensajes huérfanos: si el anfitrión borró la sala, o si quien escribe eliminó
+      // su cuenta (US-05) con este socket todavía abierto, no se guarda nada.
+      const [sala, conPerfil] = await Promise.all([buscarSala(id), perfilExiste(usuario.uid)]);
+      if (!conPerfil) {
+        socket.disconnect(true);
+        return responder({ ok: false, error: ERRORES.sinCuenta });
+      }
+      if (!sala) {
         await socket.leave(id);
         return responder({ ok: false, error: ERRORES.salaNoExiste });
       }

@@ -21,7 +21,8 @@ export interface SalaSocket {
   id: string;
   nombre: string;
   anfitrionUid: string;
-  rol: "anfitrion" | "invitado";
+  /** «administrador» = quien creó la sala (mismo nombre que usa el frontend). */
+  rol: "administrador" | "invitado";
 }
 
 export interface Mensaje {

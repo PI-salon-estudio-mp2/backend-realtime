@@ -95,7 +95,7 @@ Todas las respuestas (ack) tienen la forma `{ ok: true, data }` o `{ ok: false, 
 
 | Evento | Datos | Respuesta (ack) | Errores |
 |---|---|---|---|
-| `room:join` | `{ roomId }` | `{ sala: { id, nombre, anfitrionUid, rol }, presentes: [usuario], historial: [mensaje] }` (últimos 50 mensajes) | `VALIDATION_ERROR` (ID mal escrito), `ROOM_NOT_FOUND` |
+| `room:join` | `{ roomId }` | `{ sala: { id, nombre, anfitrionUid, rol: "administrador" | "invitado" }, presentes: [usuario], historial: [mensaje] }` (últimos 50 mensajes) | `VALIDATION_ERROR` (ID mal escrito), `ROOM_NOT_FOUND` |
 | `room:leave` | `{ roomId }` | `{ salaId }` | `NOT_IN_ROOM` |
 | `message:send` | `{ roomId, texto }` | El mensaje guardado | `NOT_IN_ROOM`, `VALIDATION_ERROR` (vacío o más de 1000 caracteres), `ROOM_NOT_FOUND` |
 
@@ -113,6 +113,7 @@ Todas las respuestas (ack) tienen la forma `{ ok: true, data }` o `{ ok: false, 
 - Al unirse, el usuario queda en `miembros` de la sala (lo usa la política de eliminar cuenta, US-05).
 - **Aislamiento:** un mensaje solo se puede enviar a la sala en la que el socket está, y solo se emite a esa sala.
 - Si la sala fue borrada, el mensaje no se guarda (no quedan mensajes huérfanos).
+- Si quien escribe eliminó su cuenta (US-05) con el socket abierto, el mensaje no se guarda y el socket se desconecta.
 
 ## Modelo en Firestore
 
