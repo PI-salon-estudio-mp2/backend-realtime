@@ -12,8 +12,8 @@ Servidor de tiempo real del **Salón de Estudio Colaborativo en Tiempo Real** (M
 
 | Recurso | URL |
 |---|---|
-| Servidor de tiempo real (Render) | _(pegar aquí la URL del servicio en Render)_ |
-| Health check | `/health` |
+| Servidor de tiempo real (Render) | https://backend-realtime-s7sh.onrender.com/ |
+| Health check | https://backend-realtime-s7sh.onrender.com/health |
 
 ## Tecnologías
 
