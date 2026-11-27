@@ -1,11 +1,5 @@
 import type { Server, Socket } from "socket.io";
-import {
-  agregarMiembro,
-  buscarSala,
-  guardarMensaje,
-  perfilExiste,
-  ultimosMensajes,
-} from "../repositories/rooms.repository";
+import type { SalaGuardada } from "../repositories/rooms.repository";
 import type {
   Ack,
   DatosSocket,
@@ -14,9 +8,23 @@ import type {
   EventosInternos,
   EventosServidor,
   Mensaje,
+  PaginaHistorial,
   SalaUnida,
   UsuarioSocket,
 } from "./eventos";
+
+/**
+ * Lo que los eventos necesitan de Firestore. En producción es repositories/rooms.repository;
+ * en las pruebas (tests/) se usa uno en memoria.
+ */
+export interface RepositorioSalas {
+  buscarSala(id: string): Promise<SalaGuardada | null>;
+  perfilExiste(uid: string): Promise<boolean>;
+  agregarMiembro(salaId: string, uid: string): Promise<void>;
+  ultimosMensajes(salaId: string, limite?: number): Promise<PaginaHistorial>;
+  mensajesAnteriores(salaId: string, antesDe: Date, limite?: number): Promise<PaginaHistorial>;
+  guardarMensaje(salaId: string, autorUid: string, autorUsername: string, texto: string): Promise<Mensaje>;
+}
 
 export type ServidorApp = Server<EventosCliente, EventosServidor, EventosInternos, DatosSocket>;
 type SocketApp = Socket<EventosCliente, EventosServidor, EventosInternos, DatosSocket>;
@@ -24,6 +32,8 @@ type SocketApp = Socket<EventosCliente, EventosServidor, EventosInternos, DatosS
 /** Mismas reglas del ID que backend-api: 8 caracteres, mayúsculas y números sin 0, O, 1, I, L. */
 const ID_SALA_REGEX = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
 export const MAX_MENSAJE = 1000;
+/** Mensajes por página del historial (al entrar y en cada history:before). */
+export const LIMITE_PAGINA = 50;
 
 const ERRORES = {
   idInvalido: { code: "VALIDATION_ERROR", message: "El ID de la sala tiene 8 caracteres: letras y números, sin espacios." },
@@ -31,6 +41,9 @@ const ERRORES = {
   fueraDeSala: { code: "NOT_IN_ROOM", message: "Primero tienes que entrar a la sala." },
   mensajeVacio: { code: "VALIDATION_ERROR", message: "Escribe un mensaje antes de enviarlo." },
   mensajeLargo: { code: "VALIDATION_ERROR", message: `Usa máximo ${MAX_MENSAJE} caracteres por mensaje.` },
+  fechaInvalida: { code: "VALIDATION_ERROR", message: "La fecha del mensaje más antiguo no es válida." },
+  limiteInvalido: { code: "VALIDATION_ERROR", message: `Pide entre 1 y ${LIMITE_PAGINA} mensajes por vez.` },
+  salaSigueExistiendo: { code: "ROOM_STILL_EXISTS", message: "La sala todavía existe. Elimínala primero desde «Mis salas»." },
   sinCuenta: { code: "UNAUTHORIZED", message: "Tu sesión no es válida o expiró. Inicia sesión de nuevo." },
   servidor: { code: "SERVER_UNAVAILABLE", message: "No se pudo conectar con la base de datos. Inténtalo de nuevo." },
 } satisfies Record<string, ErrorSocket>;
@@ -58,11 +71,35 @@ async function presentesEn(io: ServidorApp, salaId: string): Promise<UsuarioSock
   return [...porUid.values()];
 }
 
-async function anunciarPresencia(io: ServidorApp, salaId: string) {
+export async function anunciarPresencia(io: ServidorApp, salaId: string) {
   io.to(salaId).emit("presence:update", { salaId, presentes: await presentesEn(io, salaId) });
 }
 
-export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
+/**
+ * US-07 · Avisa a todos los conectados que la sala ya no existe y los saca de ella.
+ * Lo usan room:closed (aviso del anfitrión) y message:send (si alguien escribe en una sala borrada).
+ */
+function cerrarSala(io: ServidorApp, salaId: string) {
+  io.to(salaId).emit("room:deleted", { salaId });
+  io.in(salaId).socketsLeave(salaId);
+}
+
+/** Fecha ISO válida (la del mensaje más viejo en pantalla), o null. */
+function leerFecha(valor: unknown): Date | null {
+  if (typeof valor !== "string" || !valor.trim()) return null;
+  const fecha = new Date(valor);
+  return Number.isNaN(fecha.getTime()) ? null : fecha;
+}
+
+/** Límite de la página: si no viene se usan 50; fuera de 1–50 es un error. */
+function leerLimite(valor: unknown): number | null {
+  if (valor === undefined || valor === null) return LIMITE_PAGINA;
+  return Number.isInteger(valor) && (valor as number) >= 1 && (valor as number) <= LIMITE_PAGINA
+    ? (valor as number)
+    : null;
+}
+
+export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp, repo: RepositorioSalas) {
   const usuario = socket.data.usuario;
 
   /** Entrar a una sala validando su ID. Un socket está en una sola sala a la vez. */
@@ -72,7 +109,7 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
     if (!id) return responder({ ok: false, error: ERRORES.idInvalido });
 
     try {
-      const sala = await buscarSala(id);
+      const sala = await repo.buscarSala(id);
       if (!sala) return responder({ ok: false, error: ERRORES.salaNoExiste });
 
       for (const anterior of salasDe(socket)) {
@@ -81,9 +118,9 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
         await anunciarPresencia(io, anterior);
       }
 
-      await agregarMiembro(id, usuario.uid);
+      await repo.agregarMiembro(id, usuario.uid);
       await socket.join(id);
-      const [historial, presentes] = await Promise.all([ultimosMensajes(id), presentesEn(io, id)]);
+      const [historial, presentes] = await Promise.all([repo.ultimosMensajes(id, LIMITE_PAGINA), presentesEn(io, id)]);
       socket.to(id).emit("presence:update", { salaId: id, presentes });
 
       return responder({
@@ -91,7 +128,8 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
         data: {
           sala: { ...sala, rol: sala.anfitrionUid === usuario.uid ? "administrador" : "invitado" },
           presentes,
-          historial,
+          historial: historial.mensajes,
+          hayMasHistorial: historial.hayMas,
         },
       });
     } catch (error) {
@@ -126,20 +164,63 @@ export function registrarEventosDeSala(io: ServidorApp, socket: SocketApp) {
     try {
       // Sin mensajes huérfanos: si el anfitrión borró la sala, o si quien escribe eliminó
       // su cuenta (US-05) con este socket todavía abierto, no se guarda nada.
-      const [sala, conPerfil] = await Promise.all([buscarSala(id), perfilExiste(usuario.uid)]);
+      const [sala, conPerfil] = await Promise.all([repo.buscarSala(id), repo.perfilExiste(usuario.uid)]);
       if (!conPerfil) {
         socket.disconnect(true);
         return responder({ ok: false, error: ERRORES.sinCuenta });
       }
       if (!sala) {
-        await socket.leave(id);
+        // La sala se borró y nadie avisó con room:closed: se avisa ahora a todos los que siguen dentro.
+        cerrarSala(io, id);
         return responder({ ok: false, error: ERRORES.salaNoExiste });
       }
-      const mensaje = await guardarMensaje(id, usuario.uid, usuario.username, texto);
+      const mensaje = await repo.guardarMensaje(id, usuario.uid, usuario.username, texto);
       io.to(id).emit("message:new", mensaje);
       return responder({ ok: true, data: mensaje });
     } catch (error) {
       console.error(`Error al guardar un mensaje en la sala ${id}:`, error);
+      return responder({ ok: false, error: ERRORES.servidor });
+    }
+  });
+
+  /**
+   * US-11 · Historial por partes: los mensajes anteriores al más viejo que el cliente ya tiene.
+   * Solo para quien está dentro de la sala (los mensajes nunca salen de su sala).
+   */
+  socket.on("history:before", async (datos, ack) => {
+    const responder = responderCon<PaginaHistorial>(ack);
+    const id = normalizarId(datos?.roomId);
+    if (!id || !socket.rooms.has(id)) return responder({ ok: false, error: ERRORES.fueraDeSala });
+
+    const antesDe = leerFecha(datos?.antesDe);
+    if (!antesDe) return responder({ ok: false, error: ERRORES.fechaInvalida });
+    const limite = leerLimite(datos?.limite);
+    if (limite === null) return responder({ ok: false, error: ERRORES.limiteInvalido });
+
+    try {
+      return responder({ ok: true, data: await repo.mensajesAnteriores(id, antesDe, limite) });
+    } catch (error) {
+      console.error(`Error al leer el historial de la sala ${id}:`, error);
+      return responder({ ok: false, error: ERRORES.servidor });
+    }
+  });
+
+  /**
+   * US-07 · El anfitrión ya borró la sala con DELETE /api/rooms/:id (que exige ser anfitrión → 403).
+   * Antes de avisar se comprueba en Firestore que la sala ya no existe: así nadie puede
+   * «cerrar» una sala que sigue viva. Luego todos los conectados reciben room:deleted.
+   */
+  socket.on("room:closed", async (datos, ack) => {
+    const responder = responderCon<{ salaId: string }>(ack);
+    const id = normalizarId(datos?.roomId);
+    if (!id) return responder({ ok: false, error: ERRORES.idInvalido });
+
+    try {
+      if (await repo.buscarSala(id)) return responder({ ok: false, error: ERRORES.salaSigueExistiendo });
+      cerrarSala(io, id);
+      return responder({ ok: true, data: { salaId: id } });
+    } catch (error) {
+      console.error(`Error al cerrar la sala ${id}:`, error);
       return responder({ ok: false, error: ERRORES.servidor });
     }
   });

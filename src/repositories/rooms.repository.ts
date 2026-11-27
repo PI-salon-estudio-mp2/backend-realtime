@@ -1,6 +1,7 @@
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
 import { db } from "../config/firebase";
-import type { Mensaje } from "../socket/eventos";
+import type { Mensaje, PaginaHistorial } from "../socket/eventos";
+import { armarPagina } from "./paginacion";
 
 /**
  * Mismo modelo de backend-api:
@@ -54,15 +55,31 @@ export async function agregarMiembro(salaId: string, uid: string): Promise<void>
   await salas().doc(salaId).update({ miembros: FieldValue.arrayUnion(uid) });
 }
 
-/** Últimos mensajes de la sala, del más viejo al más nuevo. */
-export async function ultimosMensajes(salaId: string): Promise<Mensaje[]> {
-  const snapshot = await salas()
-    .doc(salaId)
-    .collection("messages")
-    .orderBy("creadoEn", "desc")
-    .limit(LIMITE_HISTORIAL)
-    .get();
-  return snapshot.docs.map((doc) => aMensaje(salaId, doc.id, doc.data())).reverse();
+const mensajesDe = (salaId: string) => salas().doc(salaId).collection("messages");
+
+/** Una página del historial: se pide uno de más para saber si quedan mensajes más viejos. */
+async function pagina(salaId: string, consulta: Query, limite: number): Promise<PaginaHistorial> {
+  const snapshot = await consulta.orderBy("creadoEn", "desc").limit(limite + 1).get();
+  const { items, hayMas } = armarPagina(snapshot.docs, limite);
+  return { mensajes: items.map((doc) => aMensaje(salaId, doc.id, doc.data())), hayMas };
+}
+
+/** Últimos mensajes de la sala (al entrar), del más viejo al más nuevo. */
+export async function ultimosMensajes(
+  salaId: string,
+  limite = LIMITE_HISTORIAL
+): Promise<PaginaHistorial> {
+  return pagina(salaId, mensajesDe(salaId), limite);
+}
+
+/** US-11 · Los `limite` mensajes anteriores a `antesDe`, del más viejo al más nuevo. */
+export async function mensajesAnteriores(
+  salaId: string,
+  antesDe: Date,
+  limite = LIMITE_HISTORIAL
+): Promise<PaginaHistorial> {
+  const consulta = mensajesDe(salaId).where("creadoEn", "<", Timestamp.fromDate(antesDe));
+  return pagina(salaId, consulta, limite);
 }
 
 export async function guardarMensaje(
@@ -72,7 +89,7 @@ export async function guardarMensaje(
   texto: string
 ): Promise<Mensaje> {
   const creadoEn = Timestamp.now();
-  const ref = await salas().doc(salaId).collection("messages").add({
+  const ref = await mensajesDe(salaId).add({
     autorUid,
     autorUsername,
     texto,

@@ -2,11 +2,16 @@
 
 Servidor de tiempo real del **Salón de Estudio Colaborativo en Tiempo Real** (Mini-proyecto 2). Usa Socket.IO para el chat y la presencia en las salas. En el Sprint 4 aquí vivirá también la señalización WebRTC (TS-03).
 
-**Estado actual (Sprint 2 · TS-02):**
-- Handshake autenticado: solo acepta conexiones con un ID token de Firebase válido.
+**Estado actual (Sprint 3):**
+- Handshake autenticado: solo acepta conexiones con un ID token de Firebase válido (TS-02).
 - Unirse a una sala validando su ID (error si no existe).
-- Mensajes de texto que llegan solo a la misma sala y se guardan en Firestore.
+- Mensajes de texto que llegan solo a la misma sala y se guardan en Firestore desde el servidor.
+- Historial por partes: los últimos 50 al entrar y `history:before` para los anteriores (US-11).
+- Aviso `room:deleted` a los conectados cuando el anfitrión elimina la sala (US-07).
+- Reconexión: vuelve a la sala al reconectarse y recupera lo que se perdió.
 - Presencia: quién está conectado en cada sala.
+
+📄 **Documentación de todos los eventos:** [docs/eventos-tiempo-real.md](docs/eventos-tiempo-real.md)
 
 ## Producción
 
@@ -27,9 +32,12 @@ src/
 ├── socket/
 │   ├── eventos.ts         Contrato de eventos (tipos compartidos con el frontend)
 │   ├── auth.ts            Handshake: verifica el ID token y carga el perfil
-│   └── salas.handlers.ts  room:join, room:leave, message:send y presencia
-├── repositories/    Acceso a Firestore (salas y mensajes)
+│   ├── servidor.ts        Crea Socket.IO (CORS, reconexión) y registra los eventos
+│   └── salas.handlers.ts  room:join, room:leave, message:send, history:before, room:closed y presencia
+├── repositories/    Acceso a Firestore (salas, mensajes e historial por páginas)
 └── index.ts         Express (/health) + Socket.IO sobre el mismo puerto
+tests/               Pruebas de los eventos con un Socket.IO y un Firestore en memoria (npm test)
+docs/                Documentación de los eventos
 ```
 
 ## Variables de entorno
@@ -51,6 +59,7 @@ Copia `.env.example` a `.env`. Las credenciales de Firebase son las **mismas** d
 npm install
 npm run dev                  # desarrollo
 npm run build && npm start   # producción
+npm test                     # pruebas de los eventos (no necesitan Firebase ni internet)
 ```
 
 Con Docker:
@@ -80,40 +89,19 @@ socket.on("connect_error", (err) => {
 
 ## Eventos de Socket.IO
 
-Todas las respuestas (ack) tienen la forma `{ ok: true, data }` o `{ ok: false, error: { code, message } }`.
+El detalle completo (datos, respuestas, errores y quién recibe cada evento) está en
+**[docs/eventos-tiempo-real.md](docs/eventos-tiempo-real.md)**. Resumen:
 
-### Handshake
-
-| Qué envía el cliente | Resultado |
-|---|---|
-| `auth: { token: <ID token> }` válido y con perfil | Conexión aceptada |
-| Sin token, token inválido, expirado o de una cuenta eliminada | `connect_error` con `data.code = "UNAUTHORIZED"` |
-| Cuenta de Google que aún no eligió username | `connect_error` con `data.code = "PROFILE_INCOMPLETE"` |
-| Firebase no respondió | `connect_error` con `data.code = "SERVER_UNAVAILABLE"` |
-
-### Cliente → servidor
-
-| Evento | Datos | Respuesta (ack) | Errores |
-|---|---|---|---|
-| `room:join` | `{ roomId }` | `{ sala: { id, nombre, anfitrionUid, rol: "administrador" | "invitado" }, presentes: [usuario], historial: [mensaje] }` (últimos 50 mensajes) | `VALIDATION_ERROR` (ID mal escrito), `ROOM_NOT_FOUND` |
-| `room:leave` | `{ roomId }` | `{ salaId }` | `NOT_IN_ROOM` |
-| `message:send` | `{ roomId, texto }` | El mensaje guardado | `NOT_IN_ROOM`, `VALIDATION_ERROR` (vacío o más de 1000 caracteres), `ROOM_NOT_FOUND` |
-
-### Servidor → clientes
-
-| Evento | Datos | A quién llega |
+| Evento | Dirección | Para qué |
 |---|---|---|
-| `message:new` | `{ id, salaId, autorUid, autorUsername, texto, creadoEn }` | Solo a los sockets de **esa** sala (incluido quien lo envió) |
-| `presence:update` | `{ salaId, presentes: [{ uid, username, avatar }] }` | Solo a los sockets de esa sala, cuando alguien entra, sale o se desconecta |
-
-### Reglas
-
-- El ID de la sala se recorta y se pasa a mayúsculas; tiene las mismas reglas de `backend-api` (8 caracteres sin 0, O, 1, I, L).
-- Un socket está en una sola sala a la vez: al unirse a otra, sale de la anterior.
-- Al unirse, el usuario queda en `miembros` de la sala (lo usa la política de eliminar cuenta, US-05).
-- **Aislamiento:** un mensaje solo se puede enviar a la sala en la que el socket está, y solo se emite a esa sala.
-- Si la sala fue borrada, el mensaje no se guarda (no quedan mensajes huérfanos).
-- Si quien escribe eliminó su cuenta (US-05) con el socket abierto, el mensaje no se guarda y el socket se desconecta.
+| `room:join` | cliente → servidor | Entrar a la sala; devuelve la sala, los presentes, los últimos 50 mensajes y `hayMasHistorial` |
+| `room:leave` | cliente → servidor | Salir de la sala |
+| `message:send` | cliente → servidor | Enviar un mensaje (se guarda en Firestore) |
+| `history:before` | cliente → servidor | Pedir los 50 mensajes anteriores (US-11) |
+| `room:closed` | cliente → servidor | El anfitrión avisa que ya eliminó la sala (US-07) |
+| `message:new` | servidor → sala | Mensaje nuevo, solo a los de esa sala |
+| `presence:update` | servidor → sala | Quién está conectado |
+| `room:deleted` | servidor → sala | La sala se eliminó; todos quedan fuera |
 
 ## Modelo en Firestore
 
@@ -132,4 +120,4 @@ Render, como Web Service con **Docker**, desde la rama `main`:
 
 ## Flujo de trabajo
 
-Una rama por historia (`feature/TS-02-socket-io`), commits que nombran la historia y un PR por historia con descripción y capturas. Nada se programa directo en `main`. Si se usa IA, se declara en el PR.
+Una rama por historia (`feature/S3-chat-historial-y-eliminar-sala`), commits que nombran la historia y un PR por historia con descripción y capturas. Nada se programa directo en `main`. Si se usa IA, se declara en el PR.
